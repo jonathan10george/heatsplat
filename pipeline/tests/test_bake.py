@@ -50,3 +50,30 @@ def test_opengl_to_opencv_flips_y_and_z():
 def test_mismatched_frames_and_poses_rejected():
     with pytest.raises(ValueError):
         bake_temperature(np.zeros((1, 3)), np.eye(4)[None], K, np.zeros((2, 100, 100)))
+
+
+def test_dead_pixel_in_one_frame_does_not_poison_the_gaussian():
+    positions = np.array([[0.0, 0.0, 5.0]])
+    good = np.full((100, 100), 7.0, np.float32)
+    bad = good.copy()
+    bad[50, 50] = np.nan
+    result = bake_temperature(positions, np.stack([_camera_at(0.0), _camera_at(0.0)]), K, np.stack([good, bad]))
+    assert result.coverage[0] == 1 and result.temperature[0] == pytest.approx(7.0)
+
+
+def test_transparent_floater_does_not_occlude_the_wall_behind_it():
+    positions = np.array([[0.0, 0.0, 2.0], [0.0, 0.0, 6.0]])
+    frame = np.full((100, 100), 9.0, np.float32)
+    occluded = bake_temperature(positions, _camera_at(0.0)[None], K, frame[None], opacities=np.array([0.9, 0.9]))
+    assert list(occluded.coverage) == [1, 0]
+    seen = bake_temperature(positions, _camera_at(0.0)[None], K, frame[None], opacities=np.array([0.02, 0.9]))
+    assert list(seen.coverage) == [1, 1]
+
+
+def test_fill_far_unobserved_uses_scene_median_and_handles_single_observation():
+    positions = np.array([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [50.0, 0.0, 0.0]])
+    filled = fill_unobserved(positions, np.array([4.0, np.nan, np.nan], np.float32))
+    assert filled[1] == pytest.approx(4.0)  # within 1 m: nearest observed
+    assert filled[2] == pytest.approx(4.0)  # far away: median of observed (only one here)
+    filled2 = fill_unobserved(positions, np.array([4.0, 6.0, np.nan], np.float32))
+    assert filled2[2] == pytest.approx(5.0)

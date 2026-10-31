@@ -77,7 +77,7 @@ phone RGB video + thermal frames
 | 1 | Leak detail panel with cost estimate, live sensitivity slider, stats bar, click-to-fly camera | done (Oct 31) |
 | 2a | Audit report: template-based markdown with per-leak fixes, modal + download | done (Oct 31) |
 | 2b | Audit-report agent (Claude tool use + retrieval over DOE weatherization guides) behind the same endpoint | next |
-| 3 | Real capture ingest: nerfstudio `transforms.json` + thermal PNGs → `bake.py` (projection + occlusion written and unit-tested; CLI wiring pending) | when hardware is in hand |
+| 3 | Real capture ingest: `ingest` CLI takes a splat `.ply` + poses (nerfstudio `transforms.json` or a COLMAP text model) + thermal frames, bakes with occlusion, auto up-axis; proven end to end on a simulated capture (both pose routes) | done (Oct 31); waiting on a camera for a real scan, see docs/duke-scan-plan.md |
 | 4 | Polish: scene picker with a second scene, screenshot export, loading skeletons, mobile layout check | final day |
 
 ### Engineering notes worth repeating to judges
@@ -95,6 +95,8 @@ phone RGB video + thermal frames
   thresholding and clustering, under a second for 110k Gaussians.
 
 ## Real capture path (hardware day)
+
+Full field plan, camera picks and the Mac-only reconstruction commands: [docs/duke-scan-plan.md](docs/duke-scan-plan.md).
 
 - Thermal camera: FLIR One Edge Pro or a TOPDON TC001 clipped rigidly to the phone.
 - Record RGB video and a thermal burst on the same walk. Keep a fixed rigid offset.

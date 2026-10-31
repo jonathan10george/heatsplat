@@ -155,3 +155,50 @@ def surface_normals(scene: GaussianScene) -> np.ndarray:
     rot = rotation_matrices(scene.rotations.astype(np.float64))
     normals = rot[np.arange(len(scene)), :, thin_axis]
     return (normals / np.linalg.norm(normals, axis=1, keepdims=True)).astype(np.float32)
+
+
+def quaternion_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Hamilton product of (w, x, y, z) quaternions; `a` may be a single quaternion broadcast over `b`."""
+    a = np.broadcast_to(np.asarray(a, dtype=np.float64), np.asarray(b).shape)
+    b = np.asarray(b, dtype=np.float64)
+    w1, x1, y1, z1 = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+    w2, x2, y2, z2 = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
+    return np.stack(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ],
+        axis=1,
+    )
+
+
+def quaternion_from_matrix(rot: np.ndarray) -> np.ndarray:
+    """(3, 3) rotation matrix -> unit quaternion (w, x, y, z)."""
+    m = np.asarray(rot, dtype=np.float64)
+    trace = np.trace(m)
+    if trace > 0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        return np.array([0.25 / s, (m[2, 1] - m[1, 2]) * s, (m[0, 2] - m[2, 0]) * s, (m[1, 0] - m[0, 1]) * s])
+    i = int(np.argmax(np.diag(m)))
+    j, k = (i + 1) % 3, (i + 2) % 3
+    s = 2.0 * np.sqrt(1.0 + m[i, i] - m[j, j] - m[k, k])
+    q = np.empty(4)
+    q[0] = (m[k, j] - m[j, k]) / s
+    q[1 + i] = 0.25 * s
+    q[1 + j] = (m[j, i] + m[i, j]) / s
+    q[1 + k] = (m[k, i] + m[i, k]) / s
+    return q / np.linalg.norm(q)
+
+
+def rotate_scene(scene: GaussianScene, rot: np.ndarray) -> GaussianScene:
+    """Rigidly rotate a scene by a (3, 3) matrix: positions and Gaussian orientations together."""
+    rot = np.asarray(rot, dtype=np.float64)
+    positions = (scene.positions.astype(np.float64) @ rot.T).astype(np.float32)
+    q_rot = quaternion_from_matrix(rot)
+    rotations = quaternion_multiply(q_rot, scene.rotations.astype(np.float64)).astype(np.float32)
+    return replace(scene, positions=positions, rotations=rotations)
+
+
+Z_UP_TO_Y_UP = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])  # (x, y, z) -> (x, z, -y)

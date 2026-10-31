@@ -40,3 +40,12 @@ uv run pytest -q
 ```bash
 uv run python -m heatsplat.cli analyze --scene demo-house --min-delta 2.5
 ```
+
+## Ingest a real capture
+
+```bash
+uv run python -m heatsplat.cli ingest --scene my-building --ply splat.ply --colmap sparse_txt --thermal-dir thermal --thermal-range 0,20 --thermal-hfov 56 --up auto
+```
+
+`--transforms transforms.json --up z` works for nerfstudio / Polycam / Luma poses instead of `--colmap`.
+The capture, reconstruction and scan-day checklist live in [docs/duke-scan-plan.md](docs/duke-scan-plan.md).
