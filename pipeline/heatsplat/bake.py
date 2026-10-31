@@ -7,6 +7,7 @@ samples are averaged per Gaussian. Poses are camera-to-world 4x4 matrices.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -109,7 +110,8 @@ def fill_unobserved(positions: np.ndarray, temperature: np.ndarray, k: int = 8, 
     dist, idx = tree.query(positions[~observed], k=min(k, int(observed.sum())))
     dist, idx = np.atleast_2d(dist.T).T, np.atleast_2d(idx.T).T  # k == 1 returns 1-D arrays
     neighbour_temps = np.where(dist <= max_distance, temperature[observed][idx], np.nan)
-    with np.errstate(all="ignore"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN rows are expected: they take the median below
         local = np.nanmean(neighbour_temps, axis=1)
     filled = temperature.copy()
     filled[~observed] = np.where(np.isfinite(local), local, float(np.median(temperature[observed])))
