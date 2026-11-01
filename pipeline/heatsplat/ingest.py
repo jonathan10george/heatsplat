@@ -28,7 +28,7 @@ import numpy as np
 
 from heatsplat.bake import Intrinsics, bake_temperature, fill_unobserved, opengl_to_opencv
 from heatsplat.ply_io import read_ply
-from heatsplat.scene import Z_UP_TO_Y_UP, GaussianScene, rotate_scene
+from heatsplat.scene import SCALE_FLOOR, Z_UP_TO_Y_UP, GaussianScene, rotate_scene
 
 THERMAL_EXTENSIONS = (".npy", ".csv", ".png", ".tif", ".tiff", ".jpg", ".jpeg", ".PNG", ".TIF", ".TIFF", ".JPG", ".JPEG")  # FLIR exports upper-case
 MIN_COVERAGE_FRACTION = 0.2  # below this the poses almost certainly do not match the splat
@@ -38,6 +38,11 @@ PATH_MIN_SPREAD_RATIO = 0.1  # ... and middle/largest ratio above which that pat
 PATH_MIN_FRAMES = 6
 PLANE_UP_MAX_TILT_DEG = 45.0  # a 'ground plane' further than this from the image-up is not one
 BELOW_GROUND_CLIP_M = 1.5  # with a known camera height, Gaussians this far under the ground are reconstruction junk
+FAR_FLOATER_PERCENTILE = 99.0  # distance from the scene's median position that counts as its extent
+FAR_FLOATER_RATIO = 2.0  # Gaussians more than this many extents out are debris (sky, mismatched matches)
+MAX_GAUSSIAN_SIGMA_M = 2.0  # a trained Gaussian wider than this (one sigma) is sky or ground fog, not a facade feature
+NEEDLE_MIN_SIGMA_M = 1.0  # needles: long thin Gaussians that streak across the view
+NEEDLE_ASPECT = 8.0  # longest axis over the middle axis
 
 
 @dataclass(frozen=True)
@@ -105,11 +110,20 @@ def load_transforms(path: Path) -> list[Frame]:
 def _colmap_intrinsics(parts: list[str]) -> Intrinsics:
     model, width, height = parts[1], int(parts[2]), int(parts[3])
     params = [float(v) for v in parts[4:]]
-    if model in ("SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE"):
-        f, cx, cy = params[0], params[1], params[2]
-        return Intrinsics(f, f, cx, cy, width, height)
-    if model in ("PINHOLE", "OPENCV", "OPENCV_FISHEYE", "FULL_OPENCV"):
+    # Brown-Conrady coefficients are carried where the model has them; fisheye models project through
+    # their own distortion, which is not modelled, so they keep the pinhole part only.
+    if model == "SIMPLE_PINHOLE":
+        return Intrinsics(params[0], params[0], params[1], params[2], width, height)
+    if model == "SIMPLE_RADIAL":
+        return Intrinsics(params[0], params[0], params[1], params[2], width, height, k1=params[3])
+    if model == "RADIAL":
+        return Intrinsics(params[0], params[0], params[1], params[2], width, height, k1=params[3], k2=params[4])
+    if model == "SIMPLE_RADIAL_FISHEYE":
+        return Intrinsics(params[0], params[0], params[1], params[2], width, height)
+    if model in ("PINHOLE", "OPENCV_FISHEYE"):
         return Intrinsics(params[0], params[1], params[2], params[3], width, height)
+    if model in ("OPENCV", "FULL_OPENCV"):
+        return Intrinsics(*params[:4], width, height, k1=params[4], k2=params[5], p1=params[6], p2=params[7])
     raise ValueError(f"unsupported COLMAP camera model {model}")
 
 
@@ -167,6 +181,30 @@ def load_thermal_map(path: Path) -> dict[str, Path]:
 def drop_below_ground(scene: GaussianScene, clip_m: float) -> tuple[GaussianScene, int]:
     """Remove Gaussians more than `clip_m` below the ground plane y=0 (SfM floaters, sky matches)."""
     keep = scene.positions[:, 1] >= -clip_m
+    dropped = int((~keep).sum())
+    return (scene.subset(keep) if dropped else scene), dropped
+
+
+def drop_far_floaters(scene: GaussianScene, ratio: float = FAR_FLOATER_RATIO) -> tuple[GaussianScene, int]:
+    """Remove Gaussians far outside the scene's bulk: beyond `ratio` times the 99th-percentile distance from its median position.
+
+    Trained splats park a few sky and mismatch Gaussians a hundred metres out; they would stretch the scene bounds the viewer frames."""
+    centre = np.median(scene.positions, axis=0)
+    distance = np.linalg.norm(scene.positions - centre, axis=1)
+    keep = distance <= np.percentile(distance, FAR_FLOATER_PERCENTILE) * ratio
+    dropped = int((~keep).sum())
+    return (scene.subset(keep) if dropped else scene), dropped
+
+
+def drop_oversized(scene: GaussianScene) -> tuple[GaussianScene, int]:
+    """Remove trained-splat debris from a metric scene: Gaussians wider than MAX_GAUSSIAN_SIGMA_M and
+    needles longer than NEEDLE_MIN_SIGMA_M with an aspect ratio above NEEDLE_ASPECT. Flat wall patches
+    (two long axes, one thin) under the cap survive."""
+    ordered = np.sort(scene.scales, axis=1)
+    longest, middle = ordered[:, 2], ordered[:, 1]
+    oversized = longest > MAX_GAUSSIAN_SIGMA_M
+    needle = (longest > NEEDLE_MIN_SIGMA_M) & (longest > NEEDLE_ASPECT * middle)
+    keep = ~(oversized | needle)
     dropped = int((~keep).sum())
     return (scene.subset(keep) if dropped else scene), dropped
 
@@ -280,8 +318,12 @@ def thermal_intrinsics(rgb: Intrinsics, frame_shape: tuple[int, int], hfov_deg: 
     if hfov_deg is not None:
         fx = 0.5 * width / math.tan(math.radians(hfov_deg) / 2)
         return Intrinsics(fx, fx, width / 2, height / 2, width, height)
-    # Assume the thermal lens shares the RGB horizontal FOV; keep pixels square (fy = fx) because
-    # the aspect ratios differ (e.g. 256x192 against 16:9 video).
+    if (width, height) == (rgb.width, rgb.height):
+        # Thermal frames registered onto the RGB image grid (ThermoScenes, FLIR MSX exports): the whole
+        # calibration carries over, including fy, the principal point and the distortion.
+        return rgb
+    # Otherwise assume the thermal lens shares the RGB horizontal FOV; keep pixels square (fy = fx)
+    # because the aspect ratios differ (e.g. 256x192 against 16:9 video).
     fx = rgb.fx * width / rgb.width
     return Intrinsics(fx, fx, width / 2, height / 2, width, height)
 
@@ -346,20 +388,26 @@ def ingest_capture(config: CaptureConfig) -> IngestResult:
     if config.scale is not None:
         if config.scale <= 0:
             raise ValueError("scale must be positive")
-        scene = replace(scene, positions=(scene.positions * config.scale).astype(np.float32), scales=(scene.scales * config.scale).astype(np.float32))
+        # Trained splats carry Gaussians already clamped to the floor; a scale below 1 must not push them under it.
+        scene = replace(scene, positions=(scene.positions * config.scale).astype(np.float32), scales=np.maximum(scene.scales * config.scale, SCALE_FLOOR).astype(np.float32))
+    dropped_oversized = 0
+    if config.scale is not None:  # the size thresholds are metric
+        scene, dropped_oversized = drop_oversized(scene)
+    centres = poses_cv[:, :3, 3]
+    if rotation is not None:
+        centres = centres @ np.asarray(rotation, dtype=np.float64).T
+    if config.scale is not None:
+        centres = centres * config.scale
     ground_shift_m = None
     dropped_below_ground = 0
     if config.camera_height_m is not None:
         if config.camera_height_m <= 0:
             raise ValueError("camera_height_m must be positive")
-        centres = poses_cv[:, :3, 3]
-        if rotation is not None:
-            centres = centres @ np.asarray(rotation, dtype=np.float64).T
-        if config.scale is not None:
-            centres = centres * config.scale
         ground_shift_m = float(config.camera_height_m - np.median(centres[:, 1]))
+        centres = centres + np.array([0.0, ground_shift_m, 0.0])
         scene = replace(scene, positions=(scene.positions + np.array([0.0, ground_shift_m, 0.0], dtype=np.float32)).astype(np.float32))
         scene, dropped_below_ground = drop_below_ground(scene, BELOW_GROUND_CLIP_M)
+    scene, dropped_far = drop_far_floaters(scene)
 
     meta = {
         "name": config.name,
@@ -378,6 +426,9 @@ def ingest_capture(config: CaptureConfig) -> IngestResult:
         "camera_height_m": config.camera_height_m,
         "ground_shift_m": ground_shift_m,
         "dropped_below_ground": dropped_below_ground,
+        "dropped_far": dropped_far,
+        "dropped_oversized": dropped_oversized,
+        "camera_centroid": centres.mean(axis=0).tolist(),  # where the scan was taken from; the viewer frames the scene from this side
         "units": "metres" if (config.scale is not None or config.colmap is None) else "unscaled (reconstruction units; areas and costs are not metric)",
     }
     return IngestResult(scene, used, tuple(skipped), baked.coverage, coverage_fraction, meta)

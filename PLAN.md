@@ -78,7 +78,7 @@ phone RGB video + thermal frames
 | 2a | Audit report: template-based markdown with per-leak fixes, modal + download | done (Oct 31) |
 | 2b | Audit-report agent (Claude tool use + retrieval over DOE weatherization guides) behind the same endpoint | next |
 | 3 | Real capture ingest: `ingest` CLI takes a splat `.ply` + poses (nerfstudio `transforms.json` or a COLMAP text model) + thermal frames, bakes with occlusion, auto up-axis; proven end to end on a simulated capture (both pose routes) | done (Oct 31); waiting on a camera for a real scan, see docs/duke-scan-plan.md |
-| 3b | Real building: ThermoScenes `buildingA_winter` (96 FLIR One frames, COLMAP poses) ingested via `scripts/thermoscenes_scene.sh`; sparse-point splat path (`points-to-splat`) for machines without a GPU; up axis from the walking plane, ground from camera height, density-adaptive clustering | done (Oct 31) on sparse points; dense splat needs the OpenSplat build (`tools/OpenSplat`, see docs/duke-scan-plan.md) |
+| 3b | Real building: ThermoScenes `buildingA_winter` (96 FLIR One frames, COLMAP poses) ingested via `scripts/thermoscenes_scene.sh`; sparse-point splat path (`points-to-splat`) for machines without a GPU; up axis from the walking plane, ground from camera height, density-adaptive clustering | done (Nov 1): dense OpenSplat splat (7000 iters, ~3 min on Metal via `scripts/build_opensplat.sh` + MPS patch); thermal bake uses the dataset's full calibration (fy + distortion); detector lights the glazed lobby and window frames (12 patches at 1.5 °C); sparse-point fallback kept |
 | 4 | Polish: screenshot export, loading skeletons, mobile layout check | final day |
 
 ### Engineering notes worth repeating to judges

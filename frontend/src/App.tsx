@@ -16,15 +16,31 @@ const DEFAULT_HOME: CameraPose = { position: [11, 5.5, 12.5], target: [0, 1.6, 0
 const HOME_DIRECTION = [0.56, 0.31, 0.77] as const; // unit-ish vector from the scene centre to the camera
 const HOME_DISTANCE_PER_METRE = 1.1; // camera distance as a multiple of the scene's longest side (fills a 60-degree view)
 const HOME_MIN_DISTANCE_M = 8;
+const HOME_ELEVATION = 0.31; // vertical component of the view direction
+const HOME_YAW_RAD = 0.35; // three-quarter look when the scene says which side it was scanned from
+const CAMERA_SIDE_MIN_OFFSET_M = 1; // closer than this the cameras surround the scene and no side is special
+
+/** Unit view direction (scene centre to camera). A one-sided scan is framed from where its cameras were. */
+export function viewDirectionFor(centre: number[], cameraCentroid: number[] | undefined): [number, number, number] {
+  const norm = Math.hypot(...HOME_DIRECTION);
+  const fallback = HOME_DIRECTION.map((v) => v / norm) as [number, number, number];
+  if (!cameraCentroid) return fallback;
+  const dx = cameraCentroid[0] - centre[0];
+  const dz = cameraCentroid[2] - centre[2];
+  if (Math.hypot(dx, dz) < CAMERA_SIDE_MIN_OFFSET_M) return fallback;
+  const yaw = Math.atan2(dx, dz) + HOME_YAW_RAD;
+  const flat = Math.sqrt(1 - HOME_ELEVATION * HOME_ELEVATION);
+  return [Math.sin(yaw) * flat, HOME_ELEVATION, Math.cos(yaw) * flat];
+}
 
 /** Frame a scene from its bounds: look at the centre from a three-quarter view that fits the longest side. */
-export function homePoseFor(bounds: { min: number[]; max: number[] } | undefined): CameraPose {
+export function homePoseFor(bounds: { min: number[]; max: number[] } | undefined, cameraCentroid?: number[]): CameraPose {
   if (!bounds) return DEFAULT_HOME;
   const centre = bounds.min.map((lo, i) => (lo + bounds.max[i]) / 2);
   const extent = Math.max(...bounds.max.map((hi, i) => hi - bounds.min[i]));
   const distance = Math.max(HOME_MIN_DISTANCE_M, extent * HOME_DISTANCE_PER_METRE);
-  const norm = Math.hypot(...HOME_DIRECTION);
-  const position = centre.map((c, i) => c + (HOME_DIRECTION[i] / norm) * distance) as [number, number, number];
+  const direction = viewDirectionFor(centre, cameraCentroid);
+  const position = centre.map((c, i) => c + direction[i] * distance) as [number, number, number];
   return { position, target: centre as [number, number, number] };
 }
 const DEFAULT_MIN_DELTA_C = 1.5;
@@ -141,7 +157,7 @@ export default function App() {
     const { min, max } = meta.bounds;
     return [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
   }, [meta]);
-  const homePose = useMemo(() => homePoseFor(meta?.bounds), [meta]);
+  const homePose = useMemo(() => homePoseFor(meta?.bounds, meta?.camera_centroid), [meta]);
 
   // Only the leaks splat changes when the threshold changes; other modes keep their cached file.
   const splatVersion = mode === "leaks" ? version : 1;

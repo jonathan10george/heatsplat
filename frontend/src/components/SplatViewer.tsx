@@ -21,7 +21,8 @@ interface Props {
 const ACCENT = 0xff7a1a;
 const SELECTED = 0xffffff;
 const MARKER_LIFT_M = 0.35;
-const FLY_DISTANCE_M = 6.5;
+const FLY_DISTANCE_M = 6.5; // closest the fly-to gets, tuned for the dense synthetic house
+const FLY_DISTANCE_PER_HOME = 0.3; // coarser (real, larger) scenes need more distance to read: a share of the home view distance
 const FLY_MS = 700;
 const CLICK_SLOP_PX = 6;
 
@@ -303,7 +304,10 @@ export default function SplatViewer({ sceneId, mode, version, leaks, selectedId,
     userInteractedRef.current = true;
     const normal = leakNormal(leak, sceneCenter);
     const target = new THREE.Vector3(...leak.centroid);
-    const destination = target.clone().addScaledVector(normal, FLY_DISTANCE_M).add(new THREE.Vector3(0, 1.2, 0));
+    const home = homePoseRef.current;
+    const homeDistance = Math.hypot(...home.position.map((p, i) => p - home.target[i]));
+    const flyDistance = Math.max(FLY_DISTANCE_M, FLY_DISTANCE_PER_HOME * homeDistance);
+    const destination = target.clone().addScaledVector(normal, flyDistance).add(new THREE.Vector3(0, 1.2, 0));
     const startPos = viewer.camera.position.clone();
     const startTarget = viewer.controls.target.clone();
     const t0 = performance.now();

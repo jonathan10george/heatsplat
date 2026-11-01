@@ -61,7 +61,7 @@ uv run python -m heatsplat.cli points-to-splat --points ws/sparse/0_txt/points3D
 COLMAP's sparse points become surface-aligned disk Gaussians, so the thermal bake and the
 detector run on a real capture within minutes. Detection adapts its clustering radius to the
 point spacing, but a sparse cloud only supports coarse anomalies: train a real splat with
-OpenSplat (see `docs/duke-scan-plan.md`) for the full analysis.
+OpenSplat (`scripts/build_opensplat.sh`, then see `docs/duke-scan-plan.md`) for the full analysis.
 
 ## Real building: ThermoScenes
 
@@ -75,7 +75,13 @@ scripts/thermoscenes_scene.sh data/captures/thermoscenes-raw/ThermoScenes/buildi
 
 The third argument is metres per unit (0.9 for `buildingA_winter`, estimated from the storey
 pitch and the photographer's stride). With `tools/OpenSplat/build/opensplat` present the script
-trains a dense splat first; otherwise it falls back to the sparse points.
+trains a dense splat first (about 3 minutes for 96 frames on an M4; an existing `splat.ply` is reused
+unless `RETRAIN=1`); otherwise it falls back to the sparse points. On the trained Building A the
+detector lights the glazing: the glass lobby and window frames run 2–3 °C warmer than the cladding,
+12 small patches at the default threshold. `scripts/build_opensplat.sh`
+builds that binary once (Homebrew cmake, opencv and pytorch plus the Xcode Metal toolchain); it also
+applies `scripts/opensplat-mps-backward.patch`, without which libtorch 2.9+ aborts in the Metal
+backward pass.
 
 `--transforms transforms.json --up z` works for nerfstudio / Polycam / Luma poses instead of `--colmap`.
 The capture, reconstruction and scan-day checklist live in [docs/duke-scan-plan.md](docs/duke-scan-plan.md).

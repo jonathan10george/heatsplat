@@ -17,6 +17,7 @@ export interface SceneMeta {
   name?: string;
   n_gaussians: number;
   bounds?: { min: [number, number, number]; max: [number, number, number] };
+  camera_centroid?: [number, number, number]; // where the capture was taken from (real scans)
   temp_range_c?: [number, number];
   color_range_c?: [number, number];
 }

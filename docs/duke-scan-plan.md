@@ -70,16 +70,20 @@ ffmpeg -ss 0.9 -i thermal.mp4 -vf fps=2 -pix_fmt gray thermal/frame_%04d.png
 scripts/colmap_sfm.sh frames ws
 ```
 
-OpenSplat (github.com/pierotofy/OpenSplat) trains the splat on Apple Metal. The source is
-already cloned under `tools/OpenSplat` and its Homebrew dependencies (cmake, opencv, pytorch)
-and the Xcode Metal toolchain are installed; building it is a one-off:
+OpenSplat (github.com/pierotofy/OpenSplat) trains the splat on Apple Metal. Building it is a
+one-off (Homebrew cmake, opencv and pytorch plus the Xcode Metal toolchain must be installed):
 
 ```bash
-cmake -S tools/OpenSplat -B tools/OpenSplat/build -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/pytorch/share/cmake -DCMAKE_BUILD_TYPE=Release && cmake --build tools/OpenSplat/build -j"$(sysctl -n hw.logicalcpu)"
+scripts/build_opensplat.sh
 ```
 
+The script clones the pinned commit under `tools/OpenSplat`, applies
+`scripts/opensplat-mps-backward.patch` (upstream fetches a Metal command buffer off the MPS
+dispatch queue in the backward pass, which libtorch 2.9+ aborts on with a SIGTRAP) and builds
+incrementally, so rerunning it is cheap.
+
 ```bash
-# splat in COLMAP's coordinate frame (the default; do not pass --center); 10–20 min for a façade
+# splat in COLMAP's coordinate frame (the default; do not pass --center); 7000 iterations take ~3 min on an M4 Air for ~100 frames
 tools/OpenSplat/build/opensplat ws -n 7000 -o ga.ply
 ```
 
@@ -113,8 +117,20 @@ patch of ground, not a single straight line.
 This path is exercised end to end on a synthetic capture (`pipeline/tests/test_ingest.py`) and
 on a real one: ThermoScenes `buildingA_winter`, 96 FLIR One frames of a four-storey office
 block in winter with COLMAP poses, goes through `scripts/thermoscenes_scene.sh` and appears in
-the viewer as "Building A, winter". On its sparse points the detector reports no clustered
-leak; the dense OpenSplat splat is the next step for that scene.
+the viewer as "Building A, winter, trained". OpenSplat trains it in about 3 minutes on an M4 Air
+(7000 iterations, 11,109 Gaussians); ingest keeps 10,159 of them after dropping 634 oversized or
+needle-shaped Gaussians, 316 below the ground and any far floaters. The script reuses an existing
+`splat.ply`; set `RETRAIN=1` to train again.
+
+What the detector finds there is the glazing: the glass entrance lobby and the window frames run
+2–3 °C warmer than the insulated cladding, reported as 12 small patches at the default 1.5 °C
+threshold (3 at 2.5 °C, none at 3 °C). That is real heat loss but not a defect, and it marks the
+limit of a detector tuned for localised leaks on a façade that is mostly glass; a brick dorm with
+punched windows is the intended target. Two estimates feed those numbers: the 0.9 m/unit scale
+(from the storey pitch) and the thermal calibration, which for this dataset is the RGB camera's
+(the thermal frames share its image grid), distortion included. The trained splat is soft:
+low-opacity floaters between the cameras and the façade blur the thermal view, and more frames
+or a longer run sharpen it. On the sparse-point preview the detector reports no leak.
 
 ## 6. Demo-day story
 

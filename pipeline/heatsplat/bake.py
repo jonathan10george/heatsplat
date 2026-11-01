@@ -28,6 +28,14 @@ class Intrinsics:
     cy: float
     width: int
     height: int
+    k1: float = 0.0  # OpenCV (Brown-Conrady) lens distortion; all zero for an ideal pinhole
+    k2: float = 0.0
+    p1: float = 0.0
+    p2: float = 0.0
+
+    @property
+    def distorted(self) -> bool:
+        return any(coefficient != 0.0 for coefficient in (self.k1, self.k2, self.p1, self.p2))
 
 
 @dataclass(frozen=True)
@@ -42,14 +50,27 @@ def opengl_to_opencv(c2w: np.ndarray) -> np.ndarray:
     return c2w @ flip
 
 
+def distort(x: np.ndarray, y: np.ndarray, K: Intrinsics) -> tuple[np.ndarray, np.ndarray]:
+    """Apply OpenCV's radial (k1, k2) and tangential (p1, p2) distortion to normalised image coordinates."""
+    r2 = x * x + y * y
+    radial = 1.0 + K.k1 * r2 + K.k2 * r2 * r2
+    xd = x * radial + 2.0 * K.p1 * x * y + K.p2 * (r2 + 2.0 * x * x)
+    yd = y * radial + K.p1 * (r2 + 2.0 * y * y) + 2.0 * K.p2 * x * y
+    return xd, yd
+
+
 def project(positions: np.ndarray, c2w: np.ndarray, K: Intrinsics) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """World points -> (u, v, depth) in an OpenCV camera. Points behind the camera get depth <= 0."""
+    """World points -> (u, v, depth) in an OpenCV camera, lens distortion included. Points behind the camera get depth <= 0."""
     w2c = np.linalg.inv(c2w)
     cam = positions @ w2c[:3, :3].T + w2c[:3, 3]
     depth = cam[:, 2]
     safe = np.where(depth > 1e-6, depth, 1e-6)
-    u = K.fx * cam[:, 0] / safe + K.cx
-    v = K.fy * cam[:, 1] / safe + K.cy
+    x = cam[:, 0] / safe
+    y = cam[:, 1] / safe
+    if K.distorted:
+        x, y = distort(x, y, K)
+    u = K.fx * x + K.cx
+    v = K.fy * y + K.cy
     return u, v, depth
 
 

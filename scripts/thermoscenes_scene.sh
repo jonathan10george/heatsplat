@@ -24,9 +24,13 @@ ln -sfn "$RAW/images" "$WORK/images"
 ln -sfn "$RAW/colmap/sparse" "$WORK/sparse"
 colmap model_converter --input_path "$RAW/colmap/sparse/0" --output_path "$WORK/colmap_txt" --output_type TXT >/dev/null
 
-RANGE="$(python3 -I -c 'import json,sys; b=json.load(open(sys.argv[1])); print(f"{b[\"absolute_min_temperature\"]},{b[\"absolute_max_temperature\"]}")' "$RAW/temperature_bounds.json")"
+RANGE="$(python3 -I -c 'import json,sys; b=json.load(open(sys.argv[1])); print("{},{}".format(b["absolute_min_temperature"], b["absolute_max_temperature"]))' "$RAW/temperature_bounds.json")"
 
-if [ -x "$OPENSPLAT" ]; then
+if [ -s "$WORK/splat.ply" ] && [ "${RETRAIN:-0}" != 1 ]; then
+  echo "reusing trained $WORK/splat.ply (RETRAIN=1 trains again)"
+  PLY="$WORK/splat.ply"
+  KIND="trained"
+elif [ -x "$OPENSPLAT" ]; then
   echo "training splat with OpenSplat ($ITERS iterations)..."
   "$OPENSPLAT" "$WORK" -n "$ITERS" -o "$WORK/splat.ply"
   PLY="$WORK/splat.ply"

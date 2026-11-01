@@ -6,8 +6,10 @@ import numpy as np
 import pytest
 
 from heatsplat.detect import detect_leaks
-from heatsplat.ingest import CaptureConfig, estimate_up_from_poses, ingest_capture, load_colmap, load_thermal_frame, load_transforms, rotation_aligning
-from heatsplat.scene import Z_UP_TO_Y_UP, GaussianScene, rotate_scene, surface_normals
+from heatsplat.bake import Intrinsics
+from heatsplat.ingest import CaptureConfig, _colmap_intrinsics, drop_far_floaters, drop_oversized, estimate_up_from_poses, ingest_capture, load_colmap, load_thermal_frame, load_transforms, rotation_aligning, thermal_intrinsics
+from heatsplat.ply_io import read_ply, write_ply
+from heatsplat.scene import SCALE_FLOOR, Z_UP_TO_Y_UP, GaussianScene, rotate_scene, surface_normals
 from heatsplat.synth import LABEL_GROUND
 from heatsplat.synthcapture import look_at_pose
 from heatsplat.synthcapture import CaptureLayout, write_capture
@@ -217,3 +219,80 @@ def test_drop_below_ground_removes_only_deep_floaters():
     assert kept.positions[:, 1].min() == pytest.approx(-0.4)
     same, none_dropped = drop_below_ground(kept, 1.5)
     assert none_dropped == 0 and same is kept
+
+
+def test_scale_below_one_keeps_floor_sized_gaussians_valid(capture, tmp_path):
+    # Trained splats carry Gaussians already clamped to SCALE_FLOOR; shrinking the scene to metres must not reject them.
+    scene = read_ply(capture / "scene.ply")
+    scales = scene.scales.copy()
+    scales[:5] = SCALE_FLOOR
+    write_ply(tmp_path / "floor.ply", replace(scene, scales=scales))
+    result = ingest_capture(CaptureConfig(tmp_path / "floor.ply", capture / "transforms.json", capture / "thermal", up_axis="y", scale=0.5))
+    assert result.scene.scales.min() >= SCALE_FLOOR
+    assert np.allclose(result.scene.scales[:5], SCALE_FLOOR)
+    assert np.allclose(result.scene.scales[5:], scene.scales[5:] * 0.5)
+
+
+def test_drop_far_floaters_removes_only_distant_debris():
+    rng = np.random.default_rng(0)
+    bulk = rng.uniform(-10.0, 10.0, (500, 3)).astype(np.float32)
+    debris = np.array([[300.0, 0.0, 0.0], [0.0, -250.0, 0.0], [0.0, 0.0, 400.0]], dtype=np.float32)
+    positions = np.concatenate([bulk, debris])
+    n = len(positions)
+    scene = GaussianScene(
+        positions=positions,
+        scales=np.full((n, 3), 0.05, dtype=np.float32),
+        rotations=np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (n, 1)),
+        colors=np.full((n, 3), 0.5, dtype=np.float32),
+        opacities=np.ones(n, dtype=np.float32),
+    )
+    cleaned, dropped = drop_far_floaters(scene)
+    assert dropped == 3 and len(cleaned) == 500
+    assert np.all(np.abs(cleaned.positions) <= 10.0)
+    assert drop_far_floaters(cleaned)[1] == 0
+
+
+def _scene_with_scales(scales: np.ndarray) -> GaussianScene:
+    n = len(scales)
+    return GaussianScene(
+        positions=np.zeros((n, 3), dtype=np.float32),
+        scales=np.asarray(scales, dtype=np.float32),
+        rotations=np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (n, 1)),
+        colors=np.full((n, 3), 0.5, dtype=np.float32),
+        opacities=np.ones(n, dtype=np.float32),
+    )
+
+
+def test_drop_oversized_removes_fog_and_needles_but_keeps_wall_patches():
+    scene = _scene_with_scales([
+        [0.05, 0.05, 0.01],  # ordinary surface Gaussian
+        [1.5, 1.5, 0.01],  # flat wall patch under the cap: keep
+        [0.8, 0.05, 0.05],  # short frame rail: keep
+        [3.0, 3.0, 0.5],  # sky / ground fog: drop
+        [2.5, 0.04, 0.04],  # needle streak: drop
+    ])
+    cleaned, dropped = drop_oversized(scene)
+    assert dropped == 2 and len(cleaned) == 3
+    assert cleaned.scales.max() == pytest.approx(1.5)
+
+
+def test_meta_records_where_the_cameras_were(capture):
+    result = ingest_capture(CaptureConfig(capture / "scene.ply", capture / "transforms.json", capture / "thermal", up_axis="y", scale=1.0, camera_height_m=1.5))
+    centroid = result.meta["camera_centroid"]
+    assert len(centroid) == 3 and abs(centroid[1] - 1.5) < 0.5
+    assert result.meta["dropped_oversized"] == 0
+
+
+def test_thermal_frames_sized_like_the_rgb_keep_its_full_calibration():
+    rgb = Intrinsics(358.5, 627.6, 239.6, 320.9, 480, 640, k1=0.0068, p2=0.06)
+    assert thermal_intrinsics(rgb, (640, 480), None) == rgb
+    small = thermal_intrinsics(rgb, (192, 256), None)
+    assert small.fx == small.fy == pytest.approx(358.5 * 256 / 480)
+    assert small.k1 == 0.0 and small.p2 == 0.0
+
+
+def test_colmap_intrinsics_carry_distortion_coefficients():
+    opencv = _colmap_intrinsics("1 OPENCV 480 640 358.5 627.6 239.6 320.9 0.0068 -1.5e-06 -0.0207 0.0616".split())
+    assert (opencv.fx, opencv.fy, opencv.k1, opencv.k2, opencv.p1, opencv.p2) == (358.5, 627.6, 0.0068, -1.5e-06, -0.0207, 0.0616)
+    radial = _colmap_intrinsics("1 SIMPLE_RADIAL 1920 1080 1500 960 540 -0.05".split())
+    assert radial.fx == radial.fy == 1500 and radial.k1 == -0.05 and radial.p1 == 0.0

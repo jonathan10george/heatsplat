@@ -77,3 +77,14 @@ def test_fill_far_unobserved_uses_scene_median_and_handles_single_observation():
     assert filled[2] == pytest.approx(4.0)  # far away: median of observed (only one here)
     filled2 = fill_unobserved(positions, np.array([4.0, 6.0, np.nan], np.float32))
     assert filled2[2] == pytest.approx(5.0)
+
+
+def test_project_applies_radial_and_tangential_distortion():
+    pinhole = Intrinsics(100.0, 100.0, 50.0, 50.0, 100, 100)
+    distorted = Intrinsics(100.0, 100.0, 50.0, 50.0, 100, 100, k1=0.1, p2=0.05)
+    point = np.array([[1.0, 0.5, 2.0]])  # normalised (0.5, 0.25), r^2 = 0.3125
+    u0, v0, _ = project(point, np.eye(4), pinhole)
+    u1, v1, _ = project(point, np.eye(4), distorted)
+    assert (u0[0], v0[0]) == pytest.approx((100.0, 75.0))
+    assert (u1[0], v1[0]) == pytest.approx((105.625, 77.03125))
+    assert not pinhole.distorted and distorted.distorted

@@ -1,0 +1,30 @@
+diff --git a/rasterizer/gsplat-metal/gsplat_metal.mm b/rasterizer/gsplat-metal/gsplat_metal.mm
+index e3d2da1..c187cfe 100644
+--- a/rasterizer/gsplat-metal/gsplat_metal.mm
++++ b/rasterizer/gsplat-metal/gsplat_metal.mm
+@@ -789,9 +789,9 @@ std::
+         xys.options().dtype(torch::kFloat32)
+     );
+ 
+-    // Get a reference to the command buffer for the MPS stream
+-    id<MTLCommandBuffer> command_buffer = torch::mps::get_command_buffer();
+-    TORCH_CHECK(command_buffer, "Failed to retrieve command buffer reference");
++    // The kernel dispatch below takes its own command buffer inside the MPS
++    // dispatch queue; fetching one here, off that queue, trips libtorch's
++    // dispatch_assert_queue (libtorch >= 2.9) on the autograd worker thread.
+ 
+     uint32_t img_size[2] = {img_width, img_height};
+     uint32_t tile_bounds_arr[4] = {
+@@ -885,9 +885,9 @@ std::
+     const int has_xy_abs = v_xy_abs.numel() > 0 ? 1 : 0;
+     torch::Tensor xyAbsBuf = has_xy_abs ? v_xy_abs : dummy;
+ 
+-    // Get a reference to the command buffer for the MPS stream
+-    id<MTLCommandBuffer> command_buffer = torch::mps::get_command_buffer();
+-    TORCH_CHECK(command_buffer, "Failed to retrieve command buffer reference");
++    // The kernel dispatch below takes its own command buffer inside the MPS
++    // dispatch queue; fetching one here, off that queue, trips libtorch's
++    // dispatch_assert_queue (libtorch >= 2.9) on the autograd worker thread.
+ 
+     uint32_t img_size[2] = {img_width, img_height};
+     uint32_t tile_bounds_arr[4] = {
