@@ -11,3 +11,6 @@ data/captures/
 
 # local build tools (OpenSplat clone + build)
 tools/
+
+# local Claude Code config (launch.json, settings.local.json)
+.claude/
