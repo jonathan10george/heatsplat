@@ -30,9 +30,14 @@ from heatsplat.bake import Intrinsics, bake_temperature, fill_unobserved, opengl
 from heatsplat.ply_io import read_ply
 from heatsplat.scene import Z_UP_TO_Y_UP, GaussianScene, rotate_scene
 
-THERMAL_EXTENSIONS = (".npy", ".csv", ".png", ".tif", ".tiff", ".jpg", ".jpeg")
+THERMAL_EXTENSIONS = (".npy", ".csv", ".png", ".tif", ".tiff", ".jpg", ".jpeg", ".PNG", ".TIF", ".TIFF", ".JPG", ".JPEG")  # FLIR exports upper-case
 MIN_COVERAGE_FRACTION = 0.2  # below this the poses almost certainly do not match the splat
 UP_SEPARATION_RATIO = 0.25  # eigenvalue ratio under which the camera X axes pin down the up direction
+PATH_PLANARITY_RATIO = 0.05  # camera centres: smallest/middle eigenvalue ratio under which the walk lies in a plane
+PATH_MIN_SPREAD_RATIO = 0.1  # ... and middle/largest ratio above which that path is 2-D rather than a line
+PATH_MIN_FRAMES = 6
+PLANE_UP_MAX_TILT_DEG = 45.0  # a 'ground plane' further than this from the image-up is not one
+BELOW_GROUND_CLIP_M = 1.5  # with a known camera height, Gaussians this far under the ground are reconstruction junk
 
 
 @dataclass(frozen=True)
@@ -59,6 +64,7 @@ class CaptureConfig:
     dataparser_transforms: Path | None = None
     up_axis: str = "z"  # "z" (nerfstudio), "y" (already Y up) or "auto" (from camera orientations)
     scale: float | None = None  # multiply positions and Gaussian sizes by this to reach metres
+    camera_height_m: float | None = None  # phone height above ground; shifts the scene so the ground sits at y=0
     min_coverage: float = MIN_COVERAGE_FRACTION
     name: str = "Real capture"
 
@@ -158,13 +164,37 @@ def load_thermal_map(path: Path) -> dict[str, Path]:
     return mapping
 
 
-def estimate_up_from_poses(c2w_opencv: np.ndarray) -> np.ndarray:
-    """World up from camera orientations, robust to the cameras being pitched up or down.
+def drop_below_ground(scene: GaussianScene, clip_m: float) -> tuple[GaussianScene, int]:
+    """Remove Gaussians more than `clip_m` below the ground plane y=0 (SfM floaters, sky matches)."""
+    keep = scene.positions[:, 1] >= -clip_m
+    dropped = int((~keep).sum())
+    return (scene.subset(keep) if dropped else scene), dropped
 
-    With near-zero roll every camera X axis is horizontal, so up is the direction with the least
-    variance across the X axes (an eigenvector). That needs the heading to vary (an arc or a
-    corner); for a straight walk the X axes are parallel and we fall back to the mean image-up,
-    which is then biased by the pitch angle.
+
+def _up_from_camera_plane(centres: np.ndarray, mean_up: np.ndarray) -> np.ndarray | None:
+    """Normal of the plane the camera centres lie in, when the walk spans a 2-D patch of ground."""
+    if len(centres) < PATH_MIN_FRAMES:
+        return None
+    centred = centres - centres.mean(axis=0)
+    eigenvalues, eigenvectors = np.linalg.eigh(centred.T @ centred / len(centred))
+    if eigenvalues[2] <= 1e-12 or eigenvalues[1] / eigenvalues[2] < PATH_MIN_SPREAD_RATIO:
+        return None  # a straight line does not define a plane
+    if eigenvalues[0] / eigenvalues[1] > PATH_PLANARITY_RATIO:
+        return None  # heights vary too much (stairs, drone) for the path to be a ground plane
+    up = eigenvectors[:, 0]
+    up = up if float(np.dot(up, mean_up)) >= 0 else -up
+    tilt = np.degrees(np.arccos(np.clip(float(np.dot(up, mean_up)), -1.0, 1.0)))
+    return up if tilt <= PLANE_UP_MAX_TILT_DEG else None
+
+
+def estimate_up_from_poses(c2w_opencv: np.ndarray) -> np.ndarray:
+    """World up from the camera path and orientations, robust to pitch and to a steady roll.
+
+    A person walking a building holds the phone at a near-constant height, so when the camera
+    centres span a 2-D patch they lie in a plane whose normal is gravity: that is the first choice.
+    Otherwise, with near-zero roll every camera X axis is horizontal, so up is the direction with
+    the least variance across the X axes (an eigenvector); that needs the heading to vary (an arc
+    or a corner). For a straight walk we fall back to the mean image-up, biased by the pitch.
     """
     rights = c2w_opencv[:, :3, 0]
     ups = -c2w_opencv[:, :3, 1]
@@ -172,6 +202,9 @@ def estimate_up_from_poses(c2w_opencv: np.ndarray) -> np.ndarray:
     if np.linalg.norm(mean_up) < 1e-6:
         raise ValueError("camera orientations cancel out; pass up_axis explicitly")
     mean_up /= np.linalg.norm(mean_up)
+    plane_up = _up_from_camera_plane(c2w_opencv[:, :3, 3], mean_up)
+    if plane_up is not None:
+        return plane_up
     eigenvalues, eigenvectors = np.linalg.eigh(rights.T @ rights / len(rights))
     separated = eigenvalues[1] > 1e-9 and eigenvalues[0] / eigenvalues[1] < UP_SEPARATION_RATIO
     if not separated:
@@ -314,6 +347,19 @@ def ingest_capture(config: CaptureConfig) -> IngestResult:
         if config.scale <= 0:
             raise ValueError("scale must be positive")
         scene = replace(scene, positions=(scene.positions * config.scale).astype(np.float32), scales=(scene.scales * config.scale).astype(np.float32))
+    ground_shift_m = None
+    dropped_below_ground = 0
+    if config.camera_height_m is not None:
+        if config.camera_height_m <= 0:
+            raise ValueError("camera_height_m must be positive")
+        centres = poses_cv[:, :3, 3]
+        if rotation is not None:
+            centres = centres @ np.asarray(rotation, dtype=np.float64).T
+        if config.scale is not None:
+            centres = centres * config.scale
+        ground_shift_m = float(config.camera_height_m - np.median(centres[:, 1]))
+        scene = replace(scene, positions=(scene.positions + np.array([0.0, ground_shift_m, 0.0], dtype=np.float32)).astype(np.float32))
+        scene, dropped_below_ground = drop_below_ground(scene, BELOW_GROUND_CLIP_M)
 
     meta = {
         "name": config.name,
@@ -329,6 +375,9 @@ def ingest_capture(config: CaptureConfig) -> IngestResult:
         "estimated_up": None if estimated_up is None else estimated_up.tolist(),
         "applied_rotation": None if rotation is None else np.asarray(rotation).tolist(),
         "scale_to_metres": config.scale,
+        "camera_height_m": config.camera_height_m,
+        "ground_shift_m": ground_shift_m,
+        "dropped_below_ground": dropped_below_ground,
         "units": "metres" if (config.scale is not None or config.colmap is None) else "unscaled (reconstruction units; areas and costs are not metric)",
     }
     return IngestResult(scene, used, tuple(skipped), baked.coverage, coverage_fraction, meta)

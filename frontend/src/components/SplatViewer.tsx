@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import * as GaussianSplats3D from "@mkkellogg/gaussian-splats-3d";
 import { api } from "../api";
-import type { Leak, SplatMode } from "../types";
+import type { Leak, SplatMode, CameraPose } from "../types";
 
 export type ViewerStatus = { state: "loading" | "ready" | "error"; message?: string };
 
@@ -13,6 +13,7 @@ interface Props {
   leaks: Leak[];
   selectedId: string | null;
   sceneCenter: [number, number, number];
+  homePose: CameraPose;
   onSelect: (id: string) => void;
   onStatus: (status: ViewerStatus) => void;
 }
@@ -23,12 +24,6 @@ const MARKER_LIFT_M = 0.35;
 const FLY_DISTANCE_M = 6.5;
 const FLY_MS = 700;
 const CLICK_SLOP_PX = 6;
-const INITIAL_CAMERA = { position: [11, 5.5, 12.5] as [number, number, number], target: [0, 1.6, 0] as [number, number, number] };
-
-interface CameraPose {
-  position: [number, number, number];
-  target: [number, number, number];
-}
 
 /** Outward unit normal of a leak: the thinnest bbox axis, pointing away from the scene centre. */
 export function leakNormal(leak: Leak, sceneCenter: [number, number, number]): THREE.Vector3 {
@@ -107,16 +102,30 @@ const SPLAT_LOAD_OPTIONS = {
   progressiveLoad: false,
 };
 
-export default function SplatViewer({ sceneId, mode, version, leaks, selectedId, sceneCenter, onSelect, onStatus }: Props) {
+export default function SplatViewer({ sceneId, mode, version, leaks, selectedId, sceneCenter, homePose, onSelect, onStatus }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
   const queueRef = useRef<Promise<unknown>>(Promise.resolve());
   const markersRef = useRef<THREE.Group | null>(null);
   const markerSceneRef = useRef<THREE.Scene>(new THREE.Scene());
-  const poseRef = useRef<CameraPose>(INITIAL_CAMERA);
+  const poseRef = useRef<CameraPose>(homePose);
+  const lastSceneRef = useRef<string | null>(null);
   const userInteractedRef = useRef(false);
+  const homePoseRef = useRef(homePose);
+  homePoseRef.current = homePose;
   const flyRef = useRef<number | null>(null);
   const [viewerReady, setViewerReady] = useState(0);
+
+  // Scene bounds usually arrive after the viewer exists: frame the scene then, unless the user
+  // has already taken the camera somewhere.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || userInteractedRef.current) return;
+    viewer.camera.position.set(...homePose.position);
+    viewer.controls.target.set(...homePose.target);
+    viewer.controls.update?.();
+    poseRef.current = homePose;
+  }, [homePose, viewerReady]);
   const leaksRef = useRef(leaks);
   const selectRef = useRef(onSelect);
   const statusRef = useRef(onStatus);
@@ -132,6 +141,12 @@ export default function SplatViewer({ sceneId, mode, version, leaks, selectedId,
   // once its load has settled, because disposing mid-load makes the library's internal promises
   // reject noisily.
   useEffect(() => {
+    if (lastSceneRef.current !== sceneId) {
+      // A new scene gets its own framing; a mode switch keeps the camera where the user left it.
+      poseRef.current = homePoseRef.current;
+      userInteractedRef.current = false;
+      lastSceneRef.current = sceneId;
+    }
     const container = containerRef.current;
     if (!container) return;
     let cancelled = false;

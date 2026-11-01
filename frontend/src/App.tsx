@@ -8,10 +8,25 @@ import ReportModal from "./components/ReportModal";
 import Sensitivity from "./components/Sensitivity";
 import SplatViewer, { type ViewerStatus } from "./components/SplatViewer";
 import StatsBar from "./components/StatsBar";
-import type { Leak, LeaksPayload, Report, SceneMeta, SceneSummary, SplatMode } from "./types";
+import type { Leak, LeaksPayload, Report, SceneMeta, SceneSummary, SplatMode, CameraPose } from "./types";
 
 const ANALYZE_DEBOUNCE_MS = 250;
 const DEFAULT_CENTER: [number, number, number] = [0, 1.5, 0];
+const DEFAULT_HOME: CameraPose = { position: [11, 5.5, 12.5], target: [0, 1.6, 0] };
+const HOME_DIRECTION = [0.56, 0.31, 0.77] as const; // unit-ish vector from the scene centre to the camera
+const HOME_DISTANCE_PER_METRE = 1.1; // camera distance as a multiple of the scene's longest side (fills a 60-degree view)
+const HOME_MIN_DISTANCE_M = 8;
+
+/** Frame a scene from its bounds: look at the centre from a three-quarter view that fits the longest side. */
+export function homePoseFor(bounds: { min: number[]; max: number[] } | undefined): CameraPose {
+  if (!bounds) return DEFAULT_HOME;
+  const centre = bounds.min.map((lo, i) => (lo + bounds.max[i]) / 2);
+  const extent = Math.max(...bounds.max.map((hi, i) => hi - bounds.min[i]));
+  const distance = Math.max(HOME_MIN_DISTANCE_M, extent * HOME_DISTANCE_PER_METRE);
+  const norm = Math.hypot(...HOME_DIRECTION);
+  const position = centre.map((c, i) => c + (HOME_DIRECTION[i] / norm) * distance) as [number, number, number];
+  return { position, target: centre as [number, number, number] };
+}
 const DEFAULT_MIN_DELTA_C = 1.5;
 const SELECTION_MATCH_M = 0.75;
 const NO_LEAKS: Leak[] = [];
@@ -126,6 +141,7 @@ export default function App() {
     const { min, max } = meta.bounds;
     return [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
   }, [meta]);
+  const homePose = useMemo(() => homePoseFor(meta?.bounds), [meta]);
 
   // Only the leaks splat changes when the threshold changes; other modes keep their cached file.
   const splatVersion = mode === "leaks" ? version : 1;
@@ -162,6 +178,7 @@ export default function App() {
               leaks={leaks}
               selectedId={selectedId}
               sceneCenter={sceneCenter}
+              homePose={homePose}
               onSelect={setSelectedId}
               onStatus={setStatus}
             />

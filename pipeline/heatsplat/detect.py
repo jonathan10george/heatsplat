@@ -7,6 +7,7 @@ clustered with DBSCAN; each cluster is a leak candidate with geometry and severi
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import asdict, dataclass
 
 import numpy as np
@@ -18,6 +19,10 @@ from heatsplat.scene import GaussianScene, surface_normals
 SIGMA_FLOOR_C = 0.3
 MAD_TO_SIGMA = 1.4826
 MIN_SUPPORT_NEIGHBOURS = 8
+CLUSTER_EPS_SPACING_FACTOR = 4.0  # sparse scenes: DBSCAN radius is at least this many point spacings (SfM points sit on edges, not glass)
+MIN_LEAK_AREA_M2 = 0.12  # the default 12-point cluster on a dense splat (~0.05 m spacing) covers this much surface
+MIN_CLUSTER_POINTS_FLOOR = 4  # never accept a leak made of fewer points than this, however sparse the scene
+SPACING_SAMPLE = 20000  # points sampled to estimate the median nearest-neighbour spacing
 QUERY_CHUNK = 8192
 VOXEL_KEY_STRIDE = 1 << 20
 SILL_MAX_HEIGHT_M = 0.35
@@ -121,7 +126,8 @@ def local_baseline(positions: np.ndarray, temperature: np.ndarray, normals: np.n
         valid &= facing >= params.normal_cos_threshold
         temps = np.where(valid, support_temp[safe_idx], np.nan)
         enough = valid.sum(axis=1) >= MIN_SUPPORT_NEIGHBOURS
-        with np.errstate(all="ignore"):
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN rows are expected on sparse scenes
             med = np.nanmedian(temps, axis=1)
         baseline[start:stop] = np.where(enough, med, global_median)
     return baseline
@@ -177,6 +183,38 @@ def baseline_signature(params: DetectionParams) -> dict:
     }
 
 
+def median_point_spacing(positions: np.ndarray) -> float:
+    """Median nearest-neighbour distance, estimated on a fixed-seed sample for large scenes."""
+    if len(positions) < 2:
+        return 0.0
+    sample = positions
+    if len(positions) > SPACING_SAMPLE:
+        sample = positions[np.random.default_rng(0).choice(len(positions), SPACING_SAMPLE, replace=False)]
+    distances, _ = cKDTree(positions).query(sample, k=2)
+    return float(np.median(distances[:, 1]))
+
+
+def cluster_settings(positions: np.ndarray, params: DetectionParams) -> tuple[float, int]:
+    """DBSCAN radius and minimum cluster size, adapted to how sparse the scene is.
+
+    A dense trained splat keeps the configured values. A sparse point-cloud scene (COLMAP points
+    turned into disks) gets a radius of a few point spacings and a cluster size that still covers
+    MIN_LEAK_AREA_M2 of surface, floored at MIN_CLUSTER_POINTS_FLOOR, so leaks can form at all.
+    """
+    spacing = median_point_spacing(positions)
+    eps = max(params.cluster_eps_m, CLUSTER_EPS_SPACING_FACTOR * spacing)
+    min_points = params.cluster_min_points
+    if spacing > 0:
+        by_area = int(round(MIN_LEAK_AREA_M2 / (4.0 * spacing * spacing)))
+        min_points = int(np.clip(by_area, MIN_CLUSTER_POINTS_FLOOR, params.cluster_min_points))
+    return eps, min_points
+
+
+def effective_cluster_eps(positions: np.ndarray, params: DetectionParams) -> float:
+    """Clustering radius for this scene (see cluster_settings)."""
+    return cluster_settings(positions, params)[0]
+
+
 def cluster_leaks(scene: GaussianScene, residual_unsigned: np.ndarray, params: DetectionParams = DetectionParams(), wall_height_m: float | None = None) -> DetectionResult:
     """Threshold a residual field and group the survivors into ranked leaks. Fast."""
     positions = scene.positions.astype(np.float64)
@@ -188,11 +226,12 @@ def cluster_leaks(scene: GaussianScene, residual_unsigned: np.ndarray, params: D
     # seed. A leak's soft edges then stay attached to it instead of fragmenting as the slider rises.
     edge_delta = min(params.min_delta_c, max(params.edge_floor_c, params.min_delta_c * params.hysteresis_ratio))
     candidate = (residual >= edge_delta) & (zscore >= params.min_zscore)
-    if seed.sum() == 0 or candidate.sum() < params.cluster_min_points:
+    eps, min_points = cluster_settings(positions, params)
+    if seed.sum() == 0 or candidate.sum() < min_points:
         return DetectionResult((), residual, seed, params)
 
     cand_idx = np.flatnonzero(candidate)
-    labels = DBSCAN(eps=params.cluster_eps_m, min_samples=params.cluster_min_points).fit(positions[cand_idx]).labels_
+    labels = DBSCAN(eps=eps, min_samples=min_points).fit(positions[cand_idx]).labels_
 
     raw = []
     for cluster_id in np.unique(labels[labels >= 0]):

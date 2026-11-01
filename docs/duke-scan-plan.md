@@ -66,20 +66,33 @@ ffmpeg -ss 0.9 -i thermal.mp4 -vf fps=2 -pix_fmt gray thermal/frame_%04d.png
 ```
 
 ```bash
-# poses from the RGB frames (brew install colmap)
-colmap automatic_reconstructor --workspace_path ws --image_path frames --camera_model PINHOLE --single_camera 1
-colmap model_converter --input_path ws/sparse/0 --output_path ws/sparse_txt --output_type TXT
+# poses + sparse points from the RGB frames, CPU only (brew install colmap); ~10 min for 150 photos
+scripts/colmap_sfm.sh frames ws
+```
+
+OpenSplat (github.com/pierotofy/OpenSplat) trains the splat on Apple Metal. The source is
+already cloned under `tools/OpenSplat` and its Homebrew dependencies (cmake, opencv, pytorch)
+and the Xcode Metal toolchain are installed; building it is a one-off:
+
+```bash
+cmake -S tools/OpenSplat -B tools/OpenSplat/build -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/pytorch/share/cmake -DCMAKE_BUILD_TYPE=Release && cmake --build tools/OpenSplat/build -j"$(sysctl -n hw.logicalcpu)"
 ```
 
 ```bash
-# splat on Apple Metal (github.com/pierotofy/OpenSplat); 10–20 min for a façade
-opensplat ws -n 7000 -o ga.ply
+# splat in COLMAP's coordinate frame (the default; do not pass --center); 10–20 min for a façade
+tools/OpenSplat/build/opensplat ws -n 7000 -o ga.ply
 ```
+
+No GPU and no time to build? `uv run python -m heatsplat.cli points-to-splat --points
+ws/sparse/0_txt/points3D.txt --out ga.ply` turns COLMAP's sparse points into disk Gaussians in
+seconds. The thermal view works; detection on a few thousand points only catches coarse
+anomalies, so treat it as the preview and the trained splat as the result.
 
 ```bash
 # bake thermal onto the splat, detect, export; poses and splat share COLMAP's frame
-uv run python -m heatsplat.cli ingest --scene gilbert-addoms --ply ga.ply --colmap ws/sparse_txt \
-  --thermal-dir thermal --thermal-range 0,20 --thermal-hfov 56 --up auto --scale 0.83 --name "Gilbert-Addoms, East Campus"
+uv run python -m heatsplat.cli ingest --scene gilbert-addoms --ply ga.ply --colmap ws/sparse/0_txt \
+  --thermal-dir thermal --thermal-range 0,20 --thermal-hfov 56 --up auto --scale 0.83 --camera-height 1.5 \
+  --name "Gilbert-Addoms, East Campus"
 ```
 
 Then open the viewer: the scene appears in the picker. Check thermal mode first. If the thermal
@@ -89,12 +102,19 @@ KIRI export a splat `.ply` from the same RGB video on the phone, and `--transfor
 nerfstudio-style poses. Their world up axis varies (ARKit exports are often Y up): try
 `--up auto` first, then `--up y` or `--up z` if the house lies on its side.
 
-Two flags matter for the numbers: `--scale` (metres per reconstruction unit; measure one known
-length such as a door height in the splat and divide) so areas and costs are metric, and
-`--thermal-hfov` for the real thermal lens. The CLI warns when either is missing.
+Three flags matter for the numbers: `--scale` (metres per reconstruction unit; measure one known
+length such as a door height in the splat and divide, or use the storey pitch) so areas and
+costs are metric, `--camera-height` (how high the phone was held, usually 1.5 m) so the ground
+sits at y=0 and junk far below it is dropped, and `--thermal-hfov` for the real thermal lens.
+The CLI warns when scale or FOV is missing. `--up auto` takes gravity from the plane the camera
+centres lie in (a walk at constant phone height), so keep the phone at one height and cover a
+patch of ground, not a single straight line.
 
-This whole path is already exercised end to end on a synthetic capture
-(`pipeline/tests/test_ingest.py`), including the COLMAP route and automatic up-axis recovery.
+This path is exercised end to end on a synthetic capture (`pipeline/tests/test_ingest.py`) and
+on a real one: ThermoScenes `buildingA_winter`, 96 FLIR One frames of a four-storey office
+block in winter with COLMAP poses, goes through `scripts/thermoscenes_scene.sh` and appears in
+the viewer as "Building A, winter". On its sparse points the detector reports no clustered
+leak; the dense OpenSplat splat is the next step for that scene.
 
 ## 6. Demo-day story
 

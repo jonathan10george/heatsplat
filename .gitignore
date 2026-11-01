@@ -8,3 +8,6 @@ dist/
 data/scenes/*
 !data/scenes/.gitkeep
 data/captures/
+
+# local build tools (OpenSplat clone + build)
+tools/

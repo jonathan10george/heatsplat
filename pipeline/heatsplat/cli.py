@@ -1,4 +1,5 @@
-"""Command line: `synth` (synthetic demo), `analyze` (re-run detection), `ingest` (real capture)."""
+"""Command line: `synth` (synthetic demo), `analyze` (re-run detection), `ingest` (real capture),
+`points-to-splat` (disk Gaussians from a sparse point cloud when no splat trainer is available)."""
 
 from __future__ import annotations
 
@@ -11,6 +12,8 @@ from heatsplat.detect import DetectionParams
 from heatsplat.export import analyze_scene, export_scene
 from heatsplat.ingest import CaptureConfig, ingest_capture
 from heatsplat.paths import scene_dir
+from heatsplat.ply_io import write_ply
+from heatsplat.pointsplat import RADIUS_FACTOR, gaussians_from_points, load_points
 from heatsplat.synth import SynthParams, build_house
 
 
@@ -55,8 +58,18 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--dataparser-transforms", type=Path, default=None, help="nerfstudio dataparser_transforms.json if the ply is in that frame")
             p.add_argument("--up", choices=("y", "z", "auto"), default=None, help="world up axis of the capture (default: auto with --colmap, z with --transforms)")
             p.add_argument("--scale", type=float, default=None, help="multiply the reconstruction by this to reach metres (measure a known length)")
+            p.add_argument("--camera-height", type=float, default=None, help="phone height above ground in metres (e.g. 1.5); puts the ground at y=0")
             p.add_argument("--name", type=str, default="Real capture")
+    points = sub.add_parser("points-to-splat", help="disk Gaussians from a COLMAP points3D.txt or PLY point cloud (no GPU trainer needed)")
+    points.add_argument("--points", required=True, type=Path, help="COLMAP points3D.txt or a binary PLY point cloud")
+    points.add_argument("--out", required=True, type=Path, help="output 3DGS .ply for `ingest --ply`")
+    points.add_argument("--radius-factor", type=float, default=RADIUS_FACTOR, help="disk radius as a multiple of the point spacing")
     args = parser.parse_args(argv)
+    if args.command == "points-to-splat":
+        cloud = load_points(args.points)
+        count = write_ply(args.out, gaussians_from_points(cloud, args.radius_factor))
+        print(f"wrote {count:,} disk Gaussians from {len(cloud):,} points to {args.out}")
+        return 0
 
     t0 = time.perf_counter()
     target = scene_dir(args.scene)
@@ -76,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         if (args.transforms is None) == (args.colmap is None):
             print("pass exactly one of --transforms or --colmap", file=sys.stderr)
             return 2
-        result = ingest_capture(CaptureConfig(args.ply, args.transforms, args.thermal_dir, colmap=args.colmap, thermal_map=args.thermal_map, thermal_range_c=thermal_range, thermal_hfov_deg=args.thermal_hfov, up_axis=up_axis, scale=args.scale, dataparser_transforms=args.dataparser_transforms, name=args.name))
+        result = ingest_capture(CaptureConfig(args.ply, args.transforms, args.thermal_dir, colmap=args.colmap, thermal_map=args.thermal_map, thermal_range_c=thermal_range, thermal_hfov_deg=args.thermal_hfov, up_axis=up_axis, scale=args.scale, camera_height_m=args.camera_height, dataparser_transforms=args.dataparser_transforms, name=args.name))
         print(f"baked {len(result.scene):,} Gaussians from {result.frames_used} thermal frames ({result.coverage_fraction:.0%} observed); skipped {len(result.frames_skipped)} poses without frames")
         if result.meta["units"] != "metres":
             print("WARNING: reconstruction units are not metres; pass --scale (metres per unit) or areas and costs will be off", file=sys.stderr)

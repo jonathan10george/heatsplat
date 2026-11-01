@@ -1,11 +1,13 @@
 import json
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
 from heatsplat.detect import detect_leaks
 from heatsplat.ingest import CaptureConfig, estimate_up_from_poses, ingest_capture, load_colmap, load_thermal_frame, load_transforms, rotation_aligning
-from heatsplat.scene import Z_UP_TO_Y_UP, rotate_scene, surface_normals
+from heatsplat.scene import Z_UP_TO_Y_UP, GaussianScene, rotate_scene, surface_normals
 from heatsplat.synth import LABEL_GROUND
 from heatsplat.synthcapture import look_at_pose
 from heatsplat.synthcapture import CaptureLayout, write_capture
@@ -165,3 +167,53 @@ def test_colmap_images_without_blank_point_lines(capture, tmp_path):
     stripped = "\n".join(ln for ln in (capture / "colmap" / "images.txt").read_text().splitlines() if ln.strip())
     (model / "images.txt").write_text(stripped + "\n")
     assert len(load_colmap(model)) == len(load_colmap(capture / "colmap")) == 12
+
+
+def test_auto_up_uses_the_walking_plane_when_heading_barely_changes():
+    """A zig-zag walk at phone height, always facing the facade and pitched 25 degrees up: the
+    camera X axes are all parallel, so only the plane of camera centres can give gravity."""
+    pitch = np.radians(25.0)
+    poses = []
+    for row, z in enumerate((9.0, 7.5, 6.0, 4.5)):
+        for x in np.linspace(-4, 4, 5):
+            eye = np.array([x, 1.5 + 0.02 * (row % 2), z])
+            target = eye + np.array([0.0, np.sin(pitch) * 10, -np.cos(pitch) * 10])
+            poses.append(look_at_pose(eye, target))
+    up = estimate_up_from_poses(np.stack(poses))
+    assert np.degrees(np.arccos(np.clip(up @ np.array([0, 1.0, 0]), -1, 1))) < 1.0
+
+
+def test_auto_up_ignores_the_walking_plane_on_stairs():
+    """Climbing while shooting: centres are not coplanar, so the orientation cue must take over."""
+    target = np.array([0.0, 0.0, 0.0])
+    poses = [look_at_pose(np.array([10 * np.sin(a), 2.0 + 3.0 * a, 10 * np.cos(a)]), target) for a in np.linspace(0, 2 * np.pi, 12, endpoint=False)]
+    up = estimate_up_from_poses(np.stack(poses))
+    assert np.degrees(np.arccos(np.clip(abs(up @ np.array([0, 1.0, 0])), -1, 1))) < 10.0
+
+
+def test_camera_height_puts_the_ground_at_zero(capture):
+    """Cameras in the synthetic capture fly at 2.5 m; declaring that height leaves the scene in
+    place, declaring 1.2 m slides everything down by 1.3 m (the lawn stays above the below-ground
+    clip), and the shift is recorded."""
+    base = CaptureConfig(capture / "scene.ply", capture / "transforms.json", capture / "thermal", up_axis="y")
+    plain = ingest_capture(base).scene
+    same = ingest_capture(replace(base, camera_height_m=2.5))
+    lower = ingest_capture(replace(base, camera_height_m=1.2))
+    assert np.allclose(same.scene.positions, plain.positions, atol=1e-3)
+    assert np.allclose(lower.scene.positions[:, 1], plain.positions[:, 1] - 1.3, atol=1e-3)
+    assert np.allclose(lower.scene.positions[:, [0, 2]], plain.positions[:, [0, 2]], atol=1e-6)
+    assert lower.meta["ground_shift_m"] == pytest.approx(-1.3, abs=1e-3)
+    assert lower.meta["dropped_below_ground"] == 0
+    with pytest.raises(ValueError, match="camera_height_m"):
+        ingest_capture(replace(base, camera_height_m=0.0))
+
+
+def test_drop_below_ground_removes_only_deep_floaters():
+    from heatsplat.ingest import drop_below_ground
+    positions = np.array([[0, 2.0, 0], [0, -0.4, 0], [0, -3.0, 0], [1, 5.0, 1]], dtype=np.float32)
+    scene = GaussianScene(positions, np.full((4, 3), 0.1, np.float32), np.tile([1, 0, 0, 0], (4, 1)).astype(np.float32), np.full((4, 3), 0.5, np.float32), np.ones(4, np.float32))
+    kept, dropped = drop_below_ground(scene, 1.5)
+    assert dropped == 1 and len(kept) == 3
+    assert kept.positions[:, 1].min() == pytest.approx(-0.4)
+    same, none_dropped = drop_below_ground(kept, 1.5)
+    assert none_dropped == 0 and same is kept
