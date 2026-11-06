@@ -6,8 +6,12 @@ import Legend from "./components/Legend";
 import ModeToggle from "./components/ModeToggle";
 import ReportModal from "./components/ReportModal";
 import Sensitivity from "./components/Sensitivity";
+import ScanSweep from "./components/ScanSweep";
+import SceneStrip from "./components/SceneStrip";
 import SplatViewer, { type ViewerStatus } from "./components/SplatViewer";
 import StatsBar from "./components/StatsBar";
+import TourOverlay from "./components/TourOverlay";
+import { useTour } from "./tour";
 import type { Leak, LeaksPayload, Report, SceneMeta, SceneSummary, SplatMode, CameraPose } from "./types";
 
 const ANALYZE_DEBOUNCE_MS = 250;
@@ -77,6 +81,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [reportBusy, setReportBusy] = useState(false);
+  const [homeSignal, setHomeSignal] = useState(0);
+  const [sweep, setSweep] = useState(0);
   const debounceRef = useRef<number | null>(null);
   const analyzeSeq = useRef(0);
   const payloadRef = useRef<LeaksPayload | null>(null);
@@ -125,6 +131,7 @@ export default function App() {
   }, [sceneId, fail]);
 
   const onThreshold = (value: number) => {
+    tour.stop();
     setMinDelta(value);
     if (!sceneId) return;
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
@@ -152,6 +159,55 @@ export default function App() {
     api.report(sceneId).then(setReport).catch(fail).finally(() => setReportBusy(false));
   };
 
+  const goHome = useCallback(() => setHomeSignal((n) => n + 1), []);
+  const changeMode = useCallback((next: SplatMode) => {
+    setMode((prev) => {
+      if (prev !== next && next !== "rgb") setSweep((n) => n + 1); // the thermal layer switching on gets a scan line
+      return next;
+    });
+  }, []);
+  const tour = useTour(payload, { setMode: changeMode, select: setSelectedId, goHome });
+  const tourRef = useRef(tour);
+  tourRef.current = tour;
+
+  // Presenter keys: 1/2/3 modes, space plays or stops the tour, J/K walk the leaks, H flies home, Esc clears.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA")) return;
+      const t = tourRef.current;
+      const modes: SplatMode[] = ["rgb", "thermal", "leaks"];
+      if (e.key === "1" || e.key === "2" || e.key === "3") {
+        t.stop();
+        changeMode(modes[Number(e.key) - 1]);
+      } else if (e.key === " ") {
+        e.preventDefault();
+        if (t.running) t.stop();
+        else t.start();
+      } else if (e.key === "j" || e.key === "k" || e.key === "ArrowDown" || e.key === "ArrowUp") {
+        const list = payloadRef.current?.leaks ?? [];
+        if (list.length === 0) return;
+        e.preventDefault();
+        t.stop();
+        const forward = e.key === "j" || e.key === "ArrowDown";
+        setSelectedId((id) => {
+          const i = list.findIndex((l) => l.id === id);
+          const next = i < 0 ? (forward ? 0 : list.length - 1) : (i + (forward ? 1 : -1) + list.length) % list.length;
+          return list[next].id;
+        });
+      } else if (e.key === "h") {
+        t.stop();
+        setSelectedId(null);
+        goHome();
+      } else if (e.key === "Escape") {
+        if (t.running) t.stop();
+        else setSelectedId(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [changeMode, goHome]);
+
   const sceneCenter = useMemo<[number, number, number]>(() => {
     if (!meta?.bounds) return DEFAULT_CENTER;
     const { min, max } = meta.bounds;
@@ -171,20 +227,24 @@ export default function App() {
           <span className="logo" aria-hidden="true" />
           <span>Heatsplat</span>
         </div>
-        <select className="scene-select" value={sceneId ?? ""} onChange={(e) => setSceneId(e.target.value)} aria-label="Scene" disabled={scenes.length === 0}>
+        <SceneStrip scenes={scenes} current={sceneId} onSelect={(id) => { tour.stop(); setSceneId(id); }} />
+        <select className="scene-select" value={sceneId ?? ""} onChange={(e) => { tour.stop(); setSceneId(e.target.value); }} aria-label="Scene" disabled={scenes.length === 0}>
           {scenes.map((s) => (
             <option key={s.scene_id} value={s.scene_id}>
               {s.name} · {s.n_gaussians.toLocaleString()} Gaussians
             </option>
           ))}
         </select>
-        <ModeToggle mode={mode} onChange={setMode} disabled={!sceneId} />
+        <ModeToggle mode={mode} onChange={(m) => { tour.stop(); changeMode(m); }} disabled={!sceneId} />
+        <button className={`tour-btn ${tour.running ? "running" : ""}`} onClick={() => (tour.running ? tour.stop() : tour.start())} disabled={!payload} title="Play the scripted walkthrough (space)">
+          {tour.running ? "Stop tour" : "Play tour"} <span className="key">space</span>
+        </button>
         <span className={`status ${status.state}`} role="status">
           {status.state === "loading" ? status.message ?? "Loading" : status.state === "error" ? "Load failed" : "Live"}
         </span>
       </header>
 
-      <main className="stage">
+      <main className={`stage ${tour.running ? "touring" : ""}`}>
         {sceneId && (
           <ErrorBoundary label="3D viewer">
             <SplatViewer
@@ -195,12 +255,15 @@ export default function App() {
               selectedId={selectedId}
               sceneCenter={sceneCenter}
               homePose={homePose}
-              onSelect={setSelectedId}
+              homeSignal={homeSignal}
+              onSelect={(id) => { tour.stop(); setSelectedId(id); }}
               onStatus={setStatus}
             />
           </ErrorBoundary>
         )}
         <Legend mode={mode} colorRange={colorRange} />
+        <ScanSweep play={sweep} />
+        <TourOverlay tour={tour} />
         {status.state === "error" && <div className="stage-error">{status.message}</div>}
       </main>
 
@@ -208,7 +271,13 @@ export default function App() {
         <div className="panel-body">
           <StatsBar payload={payload} />
           <Sensitivity value={minDelta} onChange={onThreshold} busy={analyzing} />
-          <LeakPanel leaks={leaks} selectedId={selectedId} onSelect={setSelectedId} />
+          <LeakPanel leaks={leaks} selectedId={selectedId} onSelect={(id) => { tour.stop(); setSelectedId(id); }} />
+          <div className="hint-keys" aria-label="Keyboard shortcuts">
+            <span><span className="key">1</span> <span className="key">2</span> <span className="key">3</span> modes</span>
+            <span><span className="key">J</span> <span className="key">K</span> leaks</span>
+            <span><span className="key">H</span> home</span>
+            <span><span className="key">space</span> tour</span>
+          </div>
         </div>
         <div className="panel-footer">
           <button className="btn primary report-btn" onClick={onReport} disabled={!payload || reportBusy}>

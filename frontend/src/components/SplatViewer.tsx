@@ -14,6 +14,7 @@ interface Props {
   selectedId: string | null;
   sceneCenter: [number, number, number];
   homePose: CameraPose;
+  homeSignal: number; // bump to fly back to the home view and resume the slow orbit
   onSelect: (id: string) => void;
   onStatus: (status: ViewerStatus) => void;
 }
@@ -24,6 +25,10 @@ const MARKER_LIFT_M = 0.35;
 const FLY_DISTANCE_M = 6.5; // closest the fly-to gets, tuned for the dense synthetic house
 const FLY_DISTANCE_PER_HOME = 0.3; // coarser (real, larger) scenes need more distance to read: a share of the home view distance
 const FLY_MS = 700;
+const HOME_MS = 1100;
+const PULSE_IDLE = 0.06; // marker breathing amplitude as a fraction of its size
+const PULSE_SELECTED = 0.14;
+const PULSE_HZ = 1.2;
 const CLICK_SLOP_PX = 6;
 
 /** Outward unit normal of a leak: the thinnest bbox axis, pointing away from the scene centre. */
@@ -57,6 +62,8 @@ function labelSprite(text: string, selected: boolean): THREE.Sprite {
   const material = new THREE.SpriteMaterial({ map: texture, depthTest: false, depthWrite: false, transparent: true });
   const sprite = new THREE.Sprite(material);
   sprite.scale.setScalar(selected ? 0.75 : 0.6);
+  sprite.userData.baseScale = selected ? 0.75 : 0.6;
+  sprite.userData.pulse = selected ? PULSE_SELECTED : PULSE_IDLE;
   sprite.renderOrder = 1000;
   return sprite;
 }
@@ -103,7 +110,7 @@ const SPLAT_LOAD_OPTIONS = {
   progressiveLoad: false,
 };
 
-export default function SplatViewer({ sceneId, mode, version, leaks, selectedId, sceneCenter, homePose, onSelect, onStatus }: Props) {
+export default function SplatViewer({ sceneId, mode, version, leaks, selectedId, sceneCenter, homePose, homeSignal, onSelect, onStatus }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
   const queueRef = useRef<Promise<unknown>>(Promise.resolve());
@@ -198,6 +205,11 @@ export default function SplatViewer({ sceneId, mode, version, leaks, selectedId,
       viewer.update();
       viewer.render();
       if (viewerRef.current === viewer) {
+        const phase = Math.sin((performance.now() / 1000) * Math.PI * 2 * PULSE_HZ);
+        markersRef.current?.children.forEach((obj) => {
+          const base = obj.userData.baseScale as number | undefined;
+          if (base !== undefined) obj.scale.setScalar(base * (1 + (obj.userData.pulse as number) * phase));
+        });
         const savedAutoClear = renderer.autoClear;
         renderer.autoClear = false;
         renderer.render(markerSceneRef.current, viewer.camera);
@@ -294,6 +306,25 @@ export default function SplatViewer({ sceneId, mode, version, leaks, selectedId,
     [],
   );
 
+  // One camera flight at a time: an eased move of both the camera and its orbit target.
+  const flyTo = (viewer: any, position: THREE.Vector3, target: THREE.Vector3, ms: number, onArrive?: () => void) => {
+    const startPos = viewer.camera.position.clone();
+    const startTarget = viewer.controls.target.clone();
+    const t0 = performance.now();
+    if (flyRef.current) cancelAnimationFrame(flyRef.current);
+    const step = (now: number) => {
+      if (viewerRef.current !== viewer) return;
+      const t = Math.min(1, (now - t0) / ms);
+      const ease = 1 - Math.pow(1 - t, 3);
+      viewer.camera.position.lerpVectors(startPos, position, ease);
+      viewer.controls.target.lerpVectors(startTarget, target, ease);
+      viewer.controls.update?.();
+      if (t < 1) flyRef.current = requestAnimationFrame(step);
+      else onArrive?.();
+    };
+    flyRef.current = requestAnimationFrame(step);
+  };
+
   // Fly the camera to the selected leak. Depends on the selection only: a re-analysis that keeps
   // the same selection must not yank the camera back.
   useEffect(() => {
@@ -308,25 +339,24 @@ export default function SplatViewer({ sceneId, mode, version, leaks, selectedId,
     const homeDistance = Math.hypot(...home.position.map((p, i) => p - home.target[i]));
     const flyDistance = Math.max(FLY_DISTANCE_M, FLY_DISTANCE_PER_HOME * homeDistance);
     const destination = target.clone().addScaledVector(normal, flyDistance).add(new THREE.Vector3(0, 1.2, 0));
-    const startPos = viewer.camera.position.clone();
-    const startTarget = viewer.controls.target.clone();
-    const t0 = performance.now();
-    if (flyRef.current) cancelAnimationFrame(flyRef.current);
-    const step = (now: number) => {
-      if (viewerRef.current !== viewer) return;
-      const t = Math.min(1, (now - t0) / FLY_MS);
-      const ease = t * t * (3 - 2 * t);
-      viewer.camera.position.lerpVectors(startPos, destination, ease);
-      viewer.controls.target.lerpVectors(startTarget, target, ease);
-      viewer.controls.update();
-      if (t < 1) flyRef.current = requestAnimationFrame(step);
-    };
-    flyRef.current = requestAnimationFrame(step);
+    flyTo(viewer, destination, target, FLY_MS);
     return () => {
       if (flyRef.current) cancelAnimationFrame(flyRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
+
+  // Fly back to the home view when the app asks (tour start, the H key) and let the slow orbit resume.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || homeSignal === 0) return;
+    const home = homePoseRef.current;
+    flyTo(viewer, new THREE.Vector3(...home.position), new THREE.Vector3(...home.target), HOME_MS, () => {
+      userInteractedRef.current = false;
+      viewer.controls.autoRotate = true;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [homeSignal]);
 
   // Click-to-select on marker sprites.
   useEffect(() => {
